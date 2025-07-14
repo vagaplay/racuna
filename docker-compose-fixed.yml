@@ -1,0 +1,49 @@
+version: '3.8'
+
+services:
+  # Backend Flask
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: bolt-dashboard-backend
+    ports:
+      - "5001:5001"
+    environment:
+      - FLASK_ENV=production
+      - PYTHONPATH=/app
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./data:/app/data  # Persistir banco de dados
+      - ./logs:/app/logs  # Persistir logs
+    networks:
+      - bolt-network
+    restart: unless-stopped
+    # Removido healthcheck que usa curl para evitar problemas de rede
+
+  # Frontend React + Nginx
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    container_name: bolt-dashboard-frontend
+    ports:
+      - "80:80"
+      - "443:443"  # Para HTTPS futuro
+    depends_on:
+      - backend  # Dependência simples sem healthcheck
+    networks:
+      - bolt-network
+    restart: unless-stopped
+    # Removido healthcheck que usa curl para evitar problemas de rede
+
+networks:
+  bolt-network:
+    driver: bridge
+
+volumes:
+  data:
+    driver: local
+  logs:
+    driver: local
+

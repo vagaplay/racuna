@@ -1,0 +1,365 @@
+# Pipeline principal para o projeto BOLT
+# Esta pipeline orquestra o deployment completo da infraestrutura e aplicações
+
+trigger:
+  branches:
+    include:
+    - main
+    - develop
+  paths:
+    exclude:
+    - README.md
+    - docs/*
+
+variables:
+  # Configurações globais
+  azureServiceConnection: 'Azure-ServiceConnection'  # Nome da service connection no Azure DevOps
+  resourceGroupName: 'bolt-$(Build.SourceBranchName)-rg'
+  location: 'East US'
+  
+  # Configurações do Terraform
+  terraformVersion: '1.5.0'
+  terraformWorkingDirectory: '$(System.DefaultWorkingDirectory)/terraform'
+  
+  # Configurações das aplicações
+  frontendPath: '$(System.DefaultWorkingDirectory)/azure-dashboard-frontend'
+  backendPath: '$(System.DefaultWorkingDirectory)/azure-dashboard-backend'
+  functionsPath: '$(System.DefaultWorkingDirectory)/azure-functions-project'
+  
+  # Configurações de build
+  nodeVersion: '18.x'
+  pythonVersion: '3.9'
+
+stages:
+- stage: Validate
+  displayName: 'Validação e Testes'
+  jobs:
+  - job: ValidateTerraform
+    displayName: 'Validar Terraform'
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - task: TerraformInstaller@0
+      displayName: 'Instalar Terraform'
+      inputs:
+        terraformVersion: $(terraformVersion)
+    
+    - task: TerraformTaskV4@4
+      displayName: 'Terraform Init'
+      inputs:
+        provider: 'azurerm'
+        command: 'init'
+        workingDirectory: $(terraformWorkingDirectory)
+        backendServiceArm: $(azureServiceConnection)
+        backendAzureRmResourceGroupName: 'terraform-state-rg'
+        backendAzureRmStorageAccountName: 'terraformstatebolt'
+        backendAzureRmContainerName: 'tfstate'
+        backendAzureRmKey: 'bolt.$(Build.SourceBranchName).tfstate'
+    
+    - task: TerraformTaskV4@4
+      displayName: 'Terraform Validate'
+      inputs:
+        provider: 'azurerm'
+        command: 'validate'
+        workingDirectory: $(terraformWorkingDirectory)
+    
+    - task: TerraformTaskV4@4
+      displayName: 'Terraform Plan'
+      inputs:
+        provider: 'azurerm'
+        command: 'plan'
+        workingDirectory: $(terraformWorkingDirectory)
+        environmentServiceNameAzureRM: $(azureServiceConnection)
+        commandOptions: '-var-file="environments/$(Build.SourceBranchName).tfvars" -out=tfplan'
+
+  - job: ValidateFrontend
+    displayName: 'Validar Frontend'
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - task: NodeTool@0
+      displayName: 'Instalar Node.js'
+      inputs:
+        versionSpec: $(nodeVersion)
+    
+    - script: |
+        cd $(frontendPath)
+        npm ci
+        npm run lint
+        npm run test -- --coverage --watchAll=false
+        npm run build
+      displayName: 'Build e Test Frontend'
+    
+    - task: PublishTestResults@2
+      displayName: 'Publicar Resultados dos Testes'
+      inputs:
+        testResultsFormat: 'JUnit'
+        testResultsFiles: '$(frontendPath)/coverage/junit.xml'
+        mergeTestResults: true
+    
+    - task: PublishCodeCoverageResults@1
+      displayName: 'Publicar Cobertura de Código'
+      inputs:
+        codeCoverageTool: 'Cobertura'
+        summaryFileLocation: '$(frontendPath)/coverage/cobertura-coverage.xml'
+
+  - job: ValidateBackend
+    displayName: 'Validar Backend'
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - task: UsePythonVersion@0
+      displayName: 'Instalar Python'
+      inputs:
+        versionSpec: $(pythonVersion)
+    
+    - script: |
+        cd $(backendPath)
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pytest pytest-cov flake8
+        flake8 src/ --max-line-length=120
+        pytest tests/ --cov=src --cov-report=xml --cov-report=html
+      displayName: 'Build e Test Backend'
+    
+    - task: PublishTestResults@2
+      displayName: 'Publicar Resultados dos Testes'
+      inputs:
+        testResultsFormat: 'JUnit'
+        testResultsFiles: '$(backendPath)/test-results.xml'
+        mergeTestResults: true
+
+- stage: Infrastructure
+  displayName: 'Provisionar Infraestrutura'
+  dependsOn: Validate
+  condition: succeeded()
+  jobs:
+  - deployment: DeployInfrastructure
+    displayName: 'Deploy Infraestrutura'
+    pool:
+      vmImage: 'ubuntu-latest'
+    environment: '$(Build.SourceBranchName)'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - checkout: self
+          
+          - task: TerraformInstaller@0
+            displayName: 'Instalar Terraform'
+            inputs:
+              terraformVersion: $(terraformVersion)
+          
+          - task: TerraformTaskV4@4
+            displayName: 'Terraform Init'
+            inputs:
+              provider: 'azurerm'
+              command: 'init'
+              workingDirectory: $(terraformWorkingDirectory)
+              backendServiceArm: $(azureServiceConnection)
+              backendAzureRmResourceGroupName: 'terraform-state-rg'
+              backendAzureRmStorageAccountName: 'terraformstatebolt'
+              backendAzureRmContainerName: 'tfstate'
+              backendAzureRmKey: 'bolt.$(Build.SourceBranchName).tfstate'
+          
+          - task: TerraformTaskV4@4
+            displayName: 'Terraform Apply'
+            inputs:
+              provider: 'azurerm'
+              command: 'apply'
+              workingDirectory: $(terraformWorkingDirectory)
+              environmentServiceNameAzureRM: $(azureServiceConnection)
+              commandOptions: '-var-file="environments/$(Build.SourceBranchName).tfvars" -auto-approve'
+          
+          - task: TerraformTaskV4@4
+            displayName: 'Terraform Output'
+            inputs:
+              provider: 'azurerm'
+              command: 'output'
+              workingDirectory: $(terraformWorkingDirectory)
+              outputTo: 'file'
+              outputFormat: 'json'
+              fileName: '$(Pipeline.Workspace)/terraform-outputs.json'
+          
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publicar Outputs do Terraform'
+            inputs:
+              targetPath: '$(Pipeline.Workspace)/terraform-outputs.json'
+              artifact: 'terraform-outputs'
+
+- stage: Applications
+  displayName: 'Deploy Aplicações'
+  dependsOn: Infrastructure
+  condition: succeeded()
+  jobs:
+  - deployment: DeployFrontend
+    displayName: 'Deploy Frontend'
+    pool:
+      vmImage: 'ubuntu-latest'
+    environment: '$(Build.SourceBranchName)'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - checkout: self
+          
+          - task: DownloadPipelineArtifact@2
+            displayName: 'Download Terraform Outputs'
+            inputs:
+              artifact: 'terraform-outputs'
+              path: '$(Pipeline.Workspace)/terraform-outputs'
+          
+          - task: NodeTool@0
+            displayName: 'Instalar Node.js'
+            inputs:
+              versionSpec: $(nodeVersion)
+          
+          - script: |
+              cd $(frontendPath)
+              npm ci
+              npm run build
+            displayName: 'Build Frontend'
+          
+          - task: AzureWebApp@1
+            displayName: 'Deploy Frontend para Azure'
+            inputs:
+              azureSubscription: $(azureServiceConnection)
+              appType: 'webAppLinux'
+              appName: '$(frontendAppName)'  # Será extraído dos outputs do Terraform
+              package: '$(frontendPath)/dist'
+              runtimeStack: 'NODE|18-lts'
+
+  - deployment: DeployBackend
+    displayName: 'Deploy Backend'
+    pool:
+      vmImage: 'ubuntu-latest'
+    environment: '$(Build.SourceBranchName)'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - checkout: self
+          
+          - task: DownloadPipelineArtifact@2
+            displayName: 'Download Terraform Outputs'
+            inputs:
+              artifact: 'terraform-outputs'
+              path: '$(Pipeline.Workspace)/terraform-outputs'
+          
+          - task: UsePythonVersion@0
+            displayName: 'Instalar Python'
+            inputs:
+              versionSpec: $(pythonVersion)
+          
+          - script: |
+              cd $(backendPath)
+              python -m pip install --upgrade pip
+              pip install -r requirements.txt
+            displayName: 'Instalar Dependências Backend'
+          
+          - task: ArchiveFiles@2
+            displayName: 'Criar Pacote Backend'
+            inputs:
+              rootFolderOrFile: $(backendPath)
+              includeRootFolder: false
+              archiveType: 'zip'
+              archiveFile: '$(Build.ArtifactStagingDirectory)/backend.zip'
+          
+          - task: AzureWebApp@1
+            displayName: 'Deploy Backend para Azure'
+            inputs:
+              azureSubscription: $(azureServiceConnection)
+              appType: 'webAppLinux'
+              appName: '$(backendAppName)'  # Será extraído dos outputs do Terraform
+              package: '$(Build.ArtifactStagingDirectory)/backend.zip'
+              runtimeStack: 'PYTHON|3.9'
+
+  - deployment: DeployFunctions
+    displayName: 'Deploy Azure Functions'
+    pool:
+      vmImage: 'ubuntu-latest'
+    environment: '$(Build.SourceBranchName)'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - checkout: self
+          
+          - task: DownloadPipelineArtifact@2
+            displayName: 'Download Terraform Outputs'
+            inputs:
+              artifact: 'terraform-outputs'
+              path: '$(Pipeline.Workspace)/terraform-outputs'
+          
+          - task: UsePythonVersion@0
+            displayName: 'Instalar Python'
+            inputs:
+              versionSpec: $(pythonVersion)
+          
+          - script: |
+              cd $(functionsPath)
+              python -m pip install --upgrade pip
+              pip install -r requirements.txt
+            displayName: 'Instalar Dependências Functions'
+          
+          - task: ArchiveFiles@2
+            displayName: 'Criar Pacote Functions'
+            inputs:
+              rootFolderOrFile: $(functionsPath)
+              includeRootFolder: false
+              archiveType: 'zip'
+              archiveFile: '$(Build.ArtifactStagingDirectory)/functions.zip'
+          
+          - task: AzureFunctionApp@1
+            displayName: 'Deploy Functions para Azure'
+            inputs:
+              azureSubscription: $(azureServiceConnection)
+              appType: 'functionAppLinux'
+              appName: '$(functionAppName)'  # Será extraído dos outputs do Terraform
+              package: '$(Build.ArtifactStagingDirectory)/functions.zip'
+              runtimeStack: 'PYTHON|3.9'
+
+- stage: PostDeploy
+  displayName: 'Pós-Deploy'
+  dependsOn: Applications
+  condition: succeeded()
+  jobs:
+  - job: HealthCheck
+    displayName: 'Verificação de Saúde'
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - task: DownloadPipelineArtifact@2
+      displayName: 'Download Terraform Outputs'
+      inputs:
+        artifact: 'terraform-outputs'
+        path: '$(Pipeline.Workspace)/terraform-outputs'
+    
+    - script: |
+        # Extrair URLs dos outputs do Terraform
+        FRONTEND_URL=$(cat $(Pipeline.Workspace)/terraform-outputs/terraform-outputs.json | jq -r '.frontend_app_url.value')
+        BACKEND_URL=$(cat $(Pipeline.Workspace)/terraform-outputs/terraform-outputs.json | jq -r '.backend_app_url.value')
+        
+        echo "Verificando saúde do Frontend: $FRONTEND_URL"
+        curl -f $FRONTEND_URL || exit 1
+        
+        echo "Verificando saúde do Backend: $BACKEND_URL/health"
+        curl -f $BACKEND_URL/health || exit 1
+        
+        echo "Todas as verificações de saúde passaram!"
+      displayName: 'Verificar Saúde das Aplicações'
+  
+  - job: NotifyTeam
+    displayName: 'Notificar Equipe'
+    dependsOn: HealthCheck
+    condition: succeeded()
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - script: |
+        echo "Deploy do BOLT Dashboard concluído com sucesso!"
+        echo "Ambiente: $(Build.SourceBranchName)"
+        echo "Build: $(Build.BuildNumber)"
+        echo "Commit: $(Build.SourceVersion)"
+      displayName: 'Notificação de Sucesso'
+

@@ -1,0 +1,37 @@
+# Exemplo de arquivo terraform.tfvars
+# Copie este arquivo para terraform.tfvars e preencha com seus valores
+
+# Configurações básicas
+app_name            = "bolt-dashboard"
+resource_group_name = "rg-bolt-dashboard"
+location           = "Brazil South"
+environment        = "production"
+
+# SKUs dos serviços (ajuste conforme necessário)
+app_service_sku     = "B1"    # B1 = R$ ~50/mês, F1 = Gratuito (limitado)
+static_web_app_sku  = "Free"  # Free tier disponível
+
+# Credenciais Azure (obtenha no Azure Portal > App Registrations)
+azure_client_id       = "your-client-id-here"
+azure_client_secret   = "your-client-secret-here"
+azure_tenant_id       = "your-tenant-id-here"
+azure_subscription_id = "your-subscription-id-here"
+
+# Chave secreta do Flask (gere uma chave forte)
+secret_key = "your-super-secret-key-here-change-this"
+
+# Domínio customizado (opcional)
+custom_domain = ""  # ex: "dashboard.suaempresa.com"
+
+# Configurações de backup e monitoramento
+enable_backup          = true
+backup_retention_days  = 30
+enable_monitoring      = true
+
+# Tags adicionais
+tags = {
+  Owner       = "Seu Nome"
+  CostCenter  = "TI"
+  Project     = "BOLT Dashboard"
+}
+

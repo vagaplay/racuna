@@ -1,0 +1,7 @@
+azure-mgmt-resource==23.0.1
+azure-mgmt-consumption==11.0.0b1
+azure-mgmt-costmanagement==4.0.1
+azure-identity==1.15.0
+Flask==2.3.3
+Flask-CORS==4.0.0
+requests==2.31.0
